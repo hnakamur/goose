@@ -5,8 +5,8 @@ Ctrl-Z among them, which Windows' text mode would translate and stop at;
 read_line taking off a carriage return only before a newline, never one the
 builder held before or one at EOF, and keeping a NUL byte and a 70,000-byte
 line, longer than stdio's buffer; read_stdin(out, max) appending at most max
-bytes a call, past its 64 KB buffer too, and reading nothing for a max of 0;
-and on POSIX write_file_atomic keeping the permissions of the file it
+bytes a call, across several 64 KB reads too, and reading nothing for a max of
+0; and on POSIX write_file_atomic keeping the permissions of the file it
 replaces."""
 import os
 from pathlib import Path

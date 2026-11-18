@@ -131,6 +131,21 @@ static int gs_os_kind(const gs_os_char *p) {
 #endif
 }
 
+/* The whole stream into the builder, reading straight into its elements: a
+   live resizable tops its stack and owns everything from its base to it
+   (spec §1.3), so the bytes at the top are its next ones, and a write there
+   grows it as any append does, moving the top and the header's count
+   together. Reading through a local buffer first would be a second pass over
+   every byte. */
+static void gs_os_read_stream(FILE *f, gs_rref out) {
+    for (;;) {
+        size_t n = fread(out.stk->top, 1, 65536, f);
+        if (n == 0) break;
+        out.stk->top += n;
+        out.hdr->len += n;
+    }
+}
+
 /* Appends the whole file; on a failure, nothing. */
 GS_API uint8_t gs_os_read_file(sl_u8 path, gs_rref out) {
     gs_os_char p[GS_OS_PATH_MAX];
@@ -139,12 +154,7 @@ GS_API uint8_t gs_os_read_file(sl_u8 path, gs_rref out) {
     if (!f) return 0;
     int64_t len = out.hdr->len;
     uint8_t *top = out.stk->top;
-    uint8_t buf[65536];
-    for (;;) {
-        size_t n = fread(buf, 1, sizeof buf, f);
-        if (n == 0) break;
-        gs_bld_append(out, buf, (int64_t)n);
-    }
+    gs_os_read_stream(f, out);
     int bad = ferror(f);
     fclose(f);
     if (bad) {
@@ -450,23 +460,18 @@ GS_API uint8_t gs_os_read_line(gs_rref out) {
 
 /* All of stdin. */
 GS_API void gs_os_read_stdin(gs_rref out) {
-    uint8_t buf[65536];
-    for (;;) {
-        size_t n = fread(buf, 1, sizeof buf, stdin);
-        if (n == 0) break;
-        gs_bld_append(out, buf, (int64_t)n);
-    }
+    gs_os_read_stream(stdin, out);
 }
 
 /* Up to max bytes of stdin; false when none were left. */
 GS_API uint8_t gs_os_read_stdin_max(gs_rref out, int64_t max) {
-    uint8_t buf[65536];
     int64_t got = 0;
     while (got < max) {
-        size_t want = max - got < (int64_t)sizeof buf ? (size_t)(max - got) : sizeof buf;
-        size_t n = fread(buf, 1, want, stdin);
+        size_t want = max - got < 65536 ? (size_t)(max - got) : 65536;
+        size_t n = fread(out.stk->top, 1, want, stdin);
         if (n == 0) break;
-        gs_bld_append(out, buf, (int64_t)n);
+        out.stk->top += n;
+        out.hdr->len += n;
         got += (int64_t)n;
     }
     return got > 0;
