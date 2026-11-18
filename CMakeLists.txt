@@ -220,7 +220,9 @@ if(GOOSE_BUILD_LSP_TESTS)
     foreach(prop INCLUDE_DIRECTORIES COMPILE_DEFINITIONS COMPILE_OPTIONS LINK_OPTIONS LINK_LIBRARIES)
         set_property(TARGET goose_lsp_test PROPERTY ${prop} "$<TARGET_PROPERTY:goose,${prop}>")
     endforeach()
-    add_dependencies(goose_lsp_test tcc_runtime)
+    # The copied INCLUDE_DIRECTORIES point at version/goose_version.h, which
+    # only the goose_version target generates, so this target needs it too.
+    add_dependencies(goose_lsp_test goose_version tcc_runtime)
     enable_testing()
     add_test(NAME lsp_call_hierarchy COMMAND goose_lsp_test
         "${CMAKE_CURRENT_SOURCE_DIR}/stdlib" "${CMAKE_CURRENT_BINARY_DIR}/lsp_calls.goose")
