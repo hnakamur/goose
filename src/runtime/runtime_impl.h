@@ -668,6 +668,38 @@ GS_API uint8_t *gs_reserve_region(gs_stack *stack) {
     return p;
 }
 
+/* Makes [p, p + n) safe to hand to a read the C runtime may give the kernel
+   whole: ucrt's fread gives a request larger than the stream's buffer
+   straight to ReadFile, whose probe of the whole destination fails with
+   ERROR_NOACCESS where a page is not committed yet -- a probe in the kernel,
+   which no vectored handler sees, so the commit-on-demand fault never runs.
+   Committing the range here, a no-op for pages already committed, lets such
+   a read go straight into a builder's elements; POSIX needs none of it, the
+   kernel supplies pages as it copies. Where the range would cross into the
+   guard gap, says 0, and the caller reads through a buffer instead: its copy
+   faults in user mode, committing as growth does, and an overrun aborts as
+   it did. */
+static uint8_t gs_prepare_kernel_read(uint8_t *p, size_t n) {
+    for (long i = 0; i < gs_nregions; i++) {
+        gs_region *r = &gs_regions[i];
+        uintptr_t lo = (uintptr_t)p, hi = lo + n;
+        if (lo - (uintptr_t)r->base >= r->size) continue;
+        uintptr_t limit = (uintptr_t)r->base + r->usable;
+        if (hi > limit) return 0;
+        #ifdef _WIN32
+            uintptr_t page = lo & ~(uintptr_t)(gs_page_size - 1);
+            uintptr_t end = (hi + gs_page_size - 1) & ~(uintptr_t)(gs_page_size - 1);
+            if (end > limit) end = limit;
+            if (page < end && !VirtualAlloc((void *)page, (SIZE_T)(end - page),
+                                            MEM_COMMIT, PAGE_READWRITE))
+                gs_panic("cannot commit a data stack for a read");
+            if ((uintptr_t)r->committed < end) r->committed = (uint8_t *)end;
+        #endif
+        return 1;
+    }
+    return 1;
+}
+
 /* Returns the pages [start, start + len) of one region to the OS, which
    reads them back as zeros; start and len are page-aligned. Windows
    decommits, and the access-fault handler commits the pages again on the

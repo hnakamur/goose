@@ -2097,6 +2097,39 @@ GS_API uint8_t *gs_reserve_region(gs_stack *stack) {
 }
 
 )GSRT"
+R"GSRT(/* Makes [p, p + n) safe to hand to a read the C runtime may give the kernel
+   whole: ucrt's fread gives a request larger than the stream's buffer
+   straight to ReadFile, whose probe of the whole destination fails with
+   ERROR_NOACCESS where a page is not committed yet -- a probe in the kernel,
+   which no vectored handler sees, so the commit-on-demand fault never runs.
+   Committing the range here, a no-op for pages already committed, lets such
+   a read go straight into a builder's elements; POSIX needs none of it, the
+   kernel supplies pages as it copies. Where the range would cross into the
+   guard gap, says 0, and the caller reads through a buffer instead: its copy
+   faults in user mode, committing as growth does, and an overrun aborts as
+   it did. */
+static uint8_t gs_prepare_kernel_read(uint8_t *p, size_t n) {
+    for (long i = 0; i < gs_nregions; i++) {
+        gs_region *r = &gs_regions[i];
+        uintptr_t lo = (uintptr_t)p, hi = lo + n;
+        if (lo - (uintptr_t)r->base >= r->size) continue;
+        uintptr_t limit = (uintptr_t)r->base + r->usable;
+        if (hi > limit) return 0;
+        #ifdef _WIN32
+            uintptr_t page = lo & ~(uintptr_t)(gs_page_size - 1);
+            uintptr_t end = (hi + gs_page_size - 1) & ~(uintptr_t)(gs_page_size - 1);
+            if (end > limit) end = limit;
+            if (page < end && !VirtualAlloc((void *)page, (SIZE_T)(end - page),
+                                            MEM_COMMIT, PAGE_READWRITE))
+                gs_panic("cannot commit a data stack for a read");
+            if ((uintptr_t)r->committed < end) r->committed = (uint8_t *)end;
+        #endif
+        return 1;
+    }
+    return 1;
+}
+
+)GSRT"
 R"GSRT(/* Returns the pages [start, start + len) of one region to the OS, which
    reads them back as zeros; start and len are page-aligned. Windows
    decommits, and the access-fault handler commits the pages again on the
@@ -4519,6 +4552,30 @@ static int gs_os_kind(const gs_os_char *p) {
 }
 
 )GSRT"
+R"GSRT(/* Appends up to want bytes of the stream to the builder, straight into its
+   elements, whose pages gs_prepare_kernel_read makes safe for a read the C
+   runtime gives the kernel whole; where the range would cross into the
+   guard gap, through a local buffer instead, whose copy faults in user
+   mode, so an overrun of the region aborts as the copy of any append does
+   and a read ending at the region's end does not. Returns the count
+   appended. */
+static int64_t gs_os_read_some(FILE *f, gs_rref out, size_t want) {
+    uint8_t buf[65536];
+    size_t n;
+    if (gs_prepare_kernel_read(out.stk->top, want)) {
+        n = fread(out.stk->top, 1, want, f);
+        if (n == 0) return 0;
+        out.stk->top += n;
+        out.hdr->len += n;
+        return (int64_t)n;
+    }
+    n = fread(buf, 1, want, f);
+    if (n == 0) return 0;
+    gs_bld_append(out, buf, (int64_t)n);
+    return (int64_t)n;
+}
+
+)GSRT"
 R"GSRT(/* The whole stream into the builder, reading straight into its elements: a
    live resizable tops its stack and owns everything from its base to it
    (spec §1.3), so the bytes at the top are its next ones, and a write there
@@ -4527,10 +4584,7 @@ R"GSRT(/* The whole stream into the builder, reading straight into its elements:
    every byte. */
 static void gs_os_read_stream(FILE *f, gs_rref out) {
     for (;;) {
-        size_t n = fread(out.stk->top, 1, 65536, f);
-        if (n == 0) break;
-        out.stk->top += n;
-        out.hdr->len += n;
+        if (!gs_os_read_some(f, out, 65536)) break;
     }
 }
 
@@ -4879,11 +4933,9 @@ GS_API uint8_t gs_os_read_stdin_max(gs_rref out, int64_t max) {
     int64_t got = 0;
     while (got < max) {
         size_t want = max - got < 65536 ? (size_t)(max - got) : 65536;
-        size_t n = fread(out.stk->top, 1, want, stdin);
+        int64_t n = gs_os_read_some(stdin, out, want);
         if (n == 0) break;
-        out.stk->top += n;
-        out.hdr->len += n;
-        got += (int64_t)n;
+        got += n;
     }
     return got > 0;
 }

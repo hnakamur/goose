@@ -131,6 +131,29 @@ static int gs_os_kind(const gs_os_char *p) {
 #endif
 }
 
+/* Appends up to want bytes of the stream to the builder, straight into its
+   elements, whose pages gs_prepare_kernel_read makes safe for a read the C
+   runtime gives the kernel whole; where the range would cross into the
+   guard gap, through a local buffer instead, whose copy faults in user
+   mode, so an overrun of the region aborts as the copy of any append does
+   and a read ending at the region's end does not. Returns the count
+   appended. */
+static int64_t gs_os_read_some(FILE *f, gs_rref out, size_t want) {
+    uint8_t buf[65536];
+    size_t n;
+    if (gs_prepare_kernel_read(out.stk->top, want)) {
+        n = fread(out.stk->top, 1, want, f);
+        if (n == 0) return 0;
+        out.stk->top += n;
+        out.hdr->len += n;
+        return (int64_t)n;
+    }
+    n = fread(buf, 1, want, f);
+    if (n == 0) return 0;
+    gs_bld_append(out, buf, (int64_t)n);
+    return (int64_t)n;
+}
+
 /* The whole stream into the builder, reading straight into its elements: a
    live resizable tops its stack and owns everything from its base to it
    (spec §1.3), so the bytes at the top are its next ones, and a write there
@@ -139,10 +162,7 @@ static int gs_os_kind(const gs_os_char *p) {
    every byte. */
 static void gs_os_read_stream(FILE *f, gs_rref out) {
     for (;;) {
-        size_t n = fread(out.stk->top, 1, 65536, f);
-        if (n == 0) break;
-        out.stk->top += n;
-        out.hdr->len += n;
+        if (!gs_os_read_some(f, out, 65536)) break;
     }
 }
 
@@ -468,11 +488,9 @@ GS_API uint8_t gs_os_read_stdin_max(gs_rref out, int64_t max) {
     int64_t got = 0;
     while (got < max) {
         size_t want = max - got < 65536 ? (size_t)(max - got) : 65536;
-        size_t n = fread(out.stk->top, 1, want, stdin);
+        int64_t n = gs_os_read_some(stdin, out, want);
         if (n == 0) break;
-        out.stk->top += n;
-        out.hdr->len += n;
-        got += (int64_t)n;
+        got += n;
     }
     return got > 0;
 }
